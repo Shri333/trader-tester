@@ -1,7 +1,6 @@
 import streamlit as st
 import polars as pl
 from datetime import datetime
-import matplotlib.pyplot as plt
 
 
 def main(csv: bytes):
@@ -26,6 +25,9 @@ def main(csv: bytes):
             .alias("EntryTime"),
         )
         .with_columns(
+            pl.col("EntryTime").dt.to_string("%Y").alias("Year"),
+            pl.col("EntryTime").dt.to_string("%B").alias("Month"),
+            pl.col("EntryTime").dt.week().alias("Week"),
             pl.col("EntryTime").dt.to_string("%A").alias("Day"),
             pl.col("EntryTime").dt.to_string("%I:%M %p").alias("Time"),
             (pl.col("ProfitLossAfterSlippage") * 100 - pl.col("CommissionFees")).alias(
@@ -38,9 +40,6 @@ def main(csv: bytes):
     # Get date range of the data
     min_date = df.select(pl.col("EntryTime").min()).item().date()
     max_date = df.select(pl.col("EntryTime").max()).item().date()
-
-    # User inputs
-    st.sidebar.header("Test Parameters")
 
     # Date inputs for lookback period
     st.sidebar.subheader("Lookback Period")
@@ -59,39 +58,35 @@ def main(csv: bytes):
         key="lookback_end",
     )
 
-    # Date inputs for forward testing period
-    st.sidebar.subheader("Forward Testing Period")
-    forward_start = st.sidebar.date_input(
-        "Start date",
-        lookback_end,
-        min_value=lookback_end,
-        max_value=max_date,
-        key="forward_start",
-    )
-    forward_end = st.sidebar.date_input(
-        "End date",
-        max_date,
-        min_value=forward_start,
-        max_value=max_date,
-        key="forward_end",
-    )
-
-    # Sort and limit parameters
+    # Calculation parameters
+    st.sidebar.subheader("Calculation Parameters")
     sort_by = st.sidebar.selectbox("Optimize for", ("PnL", "PCR"))
-    top_n = st.sidebar.slider("Number of top time slots to consider", 1, 20, 5)
+    agg_by = st.sidebar.selectbox("Aggregate by", ("Month", "Week"))
+    top_agg_n = st.sidebar.number_input(
+        f"Number of top time slots for each {agg_by.lower()}", 1, 1000, 5
+    )
+    top_n = st.sidebar.number_input("Number of top time slots to consider", 1, 1000, 5)
 
     # Convert date objects to datetime
     lookback_start = datetime.combine(lookback_start, datetime.min.time())
     lookback_end = datetime.combine(lookback_end, datetime.max.time())
-    forward_start = datetime.combine(forward_start, datetime.min.time())
-    forward_end = datetime.combine(forward_end, datetime.max.time())
 
     # Process and display lookback data (calculate PnL and PCR)
     lookback_data = (
         df.filter(
             pl.col("EntryTime") >= lookback_start, pl.col("EntryTime") <= lookback_end
         )
-        .group_by("Day", "Time")
+        .group_by("Year", agg_by, "Time")
+        .agg(pl.col("PnL").mean(), pl.col("PCR").mean())
+        .sort(sort_by, descending=True)
+        .group_by("Year", agg_by)
+        .agg(
+            pl.col("Time").limit(top_agg_n),
+            pl.col("PnL").limit(top_agg_n),
+            pl.col("PCR").limit(top_agg_n),
+        )
+        .explode("Time", "PnL", "PCR")
+        .group_by("Time")
         .agg(pl.col("PnL").mean(), pl.col("PCR").mean())
         .sort(sort_by, descending=True)
         .limit(top_n)
@@ -100,38 +95,6 @@ def main(csv: bytes):
     st.header("Lookback Period Analysis")
     st.write(f"From {lookback_start.date()} to {lookback_end.date()}")
     st.dataframe(lookback_data, use_container_width=True)
-
-    # Get top performing day-time combinations
-    top_combinations = lookback_data.select("Day", "Time").to_dicts()
-
-    # Process forward testing data (calculate running PnL)
-    forward_data = (
-        df.filter(
-            pl.col("EntryTime") >= forward_start,
-            pl.col("EntryTime") <= forward_end,
-            pl.struct(["Day", "Time"]).is_in(top_combinations),
-        )
-        .sort("EntryTime")
-        .select(pl.col("EntryTime"), pl.col("PnL").cum_sum())
-    )
-
-    # Plot running PnL
-    st.header("Forward Period Running PnL")
-    st.write(f"From {forward_start.date()} to {forward_end.date()}")
-
-    fig, ax = plt.subplots()
-    ax.plot(
-        forward_data.select("EntryTime"),
-        forward_data.select("PnL"),
-        label="Running PnL",
-        color="blue",
-        linestyle="-",
-    )
-    ax.set_xlabel("EntryTime")
-    ax.set_ylabel("Running PnL")
-    ax.legend()
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
 
 
 if __name__ == "__main__":
