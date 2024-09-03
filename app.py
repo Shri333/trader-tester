@@ -1,6 +1,7 @@
 import streamlit as st
 import polars as pl
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 
 def main(csv: bytes):
@@ -37,26 +38,29 @@ def main(csv: bytes):
         .with_columns((pl.col("PnL") / pl.col("Premium")).alias("PCR"))
     )
 
-    # Get date range of the data
-    min_date = df.select(pl.col("EntryTime").min()).item().date()
-    max_date = df.select(pl.col("EntryTime").max()).item().date()
+    # Get date range
+    min_datetime = df.select(pl.col("EntryTime").min()).item()
+    max_datetime = df.select(pl.col("EntryTime").max()).item()
 
     # Date inputs for lookback period
     st.sidebar.subheader("Lookback Period")
     lookback_start = st.sidebar.date_input(
         "Start date",
-        min_date,
-        min_value=min_date,
-        max_value=max_date,
+        min_datetime,
+        min_value=min_datetime,
+        max_value=max_datetime - relativedelta(months=2),
         key="lookback_start",
     )
-    lookback_end = st.sidebar.date_input(
-        "End date",
-        max(lookback_start, lookback_start + (max_date - lookback_start) // 2),
-        min_value=lookback_start,
-        max_value=max_date,
-        key="lookback_end",
+    lookback_start = datetime.combine(lookback_start, datetime.min.time())
+    lookback_months = st.sidebar.number_input(
+        "Number of months",
+        value=1,
+        min_value=1,
+        max_value=((max_datetime - lookback_start).days // 30) - 1,
+        key="lookback_months",
     )
+    lookback_end = lookback_start + relativedelta(months=lookback_months)
+    lookback_end = datetime.combine(lookback_end, datetime.max.time())
 
     # Calculation parameters
     st.sidebar.subheader("Calculation Parameters")
@@ -66,10 +70,6 @@ def main(csv: bytes):
         f"Number of top time slots for each {agg_by.lower()}", 1, 1000, 5
     )
     top_n = st.sidebar.number_input("Number of top time slots to consider", 1, 1000, 5)
-
-    # Convert date objects to datetime
-    lookback_start = datetime.combine(lookback_start, datetime.min.time())
-    lookback_end = datetime.combine(lookback_end, datetime.max.time())
 
     # Process and display lookback data (calculate PnL and PCR)
     lookback_data = (
