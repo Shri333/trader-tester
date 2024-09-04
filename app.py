@@ -15,12 +15,7 @@ class App:
         self._preprocess_data()
         self._get_lookback_parameters()
         self._get_calc_parameters()
-        if self.recalc == "Anchored":
-            self._calc_anchored()
-        elif self.recalc == "Unanchored":
-            self._calc_unanchored()
-        else:
-            self._calc_fixed()
+        self._calc_forward()
 
     def _validate_data(self):
         missing_cols = {
@@ -78,43 +73,52 @@ class App:
         st.sidebar.subheader("Calculation Parameters")
         self.sort_by = st.sidebar.selectbox("Optimize for", ("PnL", "PCR"))
         self.top_n = st.sidebar.number_input("Number of top time slots", 1, 1000, 5)
-        self.recalc = st.sidebar.selectbox(
-            "Recalculation", ("Anchored", "Unanchored", "Fixed")
-        )
 
-    def _calc_anchored(self):
+    def _calc_forward(self):
         # Display lookback data for lookback period
         lookback_data = self._get_lookback_data(self.lookback_start, self.lookback_end)
         st.header("Lookback Analysis")
         st.write(f"From {self.lookback_start.date()} to {self.lookback_end.date()}")
         st.dataframe(lookback_data, use_container_width=True)
 
-        # Extend lookback period month by month and calculate PnL/PCR
-        x, y = [], []
+        # Extend lookback period month by month and calculate PnL
+        x, anchored, unanchored = [], [], []
+        unanchored_start = self.lookback_start
         forward_end = self.lookback_end + relativedelta(months=1)
-        while forward_end < self.max_datetime:
+        while forward_end <= self.max_datetime:
+            # Get current month
             forward_start = forward_end - relativedelta(months=1)
-            lookback_data = self._get_lookback_data(self.lookback_start, forward_start)
-            pnl = self._get_forward_pnl(lookback_data, forward_start, forward_end)
             x.append(forward_start)
-            y.append(pnl)
+
+            # Calculate monthly anchored
+            lookback_data = self._get_lookback_data(self.lookback_start, forward_start)
+            pnl = self._calc_forward_pnl(lookback_data, forward_start, forward_end)
+            anchored.append(pnl + anchored[-1] if anchored else pnl)
+
+            # Calculate monthly unanchored
+            lookback_data = self._get_lookback_data(unanchored_start, forward_start)
+            pnl = self._calc_forward_pnl(lookback_data, forward_start, forward_end)
+            unanchored.append(pnl + unanchored[-1] if unanchored else pnl)
+
+            unanchored_start += relativedelta(months=1)
             forward_end += relativedelta(months=1)
+
+        # Calculate fixed
+        lookback_data = self._get_lookback_data(self.lookback_start, self.lookback_end)
+        fixed = self._calc_fixed_pnl(lookback_data, self.lookback_end)
 
         # Display data as line graph
         st.header("Forward Analysis")
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(x, y)
+        ax.plot(x, anchored, label="Anchored")
+        ax.plot(x, unanchored, label="Unanchored")
+        ax.plot(x, fixed[: len(x)], label="Fixed")
         ax.set_xlabel("Date")
         ax.set_ylabel("PnL")
-        ax.set_title("PnL Each Month")
+        ax.set_title("Running PnL")
+        ax.legend()
         plt.xticks(rotation=45)
         st.pyplot(fig)
-
-    def _calc_unanchored(self):
-        pass
-
-    def _calc_fixed(self):
-        pass
 
     def _get_lookback_data(self, start, end):
         return (
@@ -128,7 +132,7 @@ class App:
             .limit(self.top_n)
         )
 
-    def _get_forward_pnl(self, lookback_data, start, end):
+    def _calc_forward_pnl(self, lookback_data, start, end):
         top_times = set(lookback_data["Time"])
         return (
             self.df.filter(
@@ -140,6 +144,19 @@ class App:
             .sum()
             .item()
         )
+
+    def _calc_fixed_pnl(self, lookback_data, start):
+        top_times = set(lookback_data["Time"])
+        return (
+            self.df.filter(
+                pl.col("EntryTime") > start,
+                pl.col("EntryTime").dt.to_string("%I:%M %p").is_in(top_times),
+            )
+            .group_by(pl.col("EntryTime").dt.to_string("%Y-%m").alias("Month"))
+            .agg(pl.col("PnL").sum())
+            .sort("Month")
+            .select(pl.col("PnL").cum_sum())
+        )["PnL"].to_list()
 
 
 if __name__ == "__main__":
