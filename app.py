@@ -42,6 +42,12 @@ class App:
                 / pl.col("Premium")
             ).alias("PCR"),
         )
+        self.df = self.df.with_columns(
+            pl.col("EntryTime").dt.year().alias("Year"),
+            pl.col("EntryTime").dt.month().alias("Month"),
+            pl.col("EntryTime").dt.week().alias("Week"),
+            pl.col("EntryTime").dt.to_string("%I:%M %p").alias("Time"),
+        )
 
     def _get_lookback_parameters(self):
         # Get date range
@@ -72,7 +78,13 @@ class App:
     def _get_calc_parameters(self):
         st.sidebar.subheader("Calculation Parameters")
         self.sort_by = st.sidebar.selectbox("Optimize for", ("PnL", "PCR"))
-        self.top_n = st.sidebar.number_input("Number of top time slots", 1, 1000, 5)
+        self.agg_by = st.sidebar.selectbox("Aggregate by", ("Month", "Week"))
+        self.top_agg_n = st.sidebar.number_input(
+            f"Number of top time slots for each {self.agg_by.lower()}", 1, 1000, 5
+        )
+        self.top_n = st.sidebar.number_input(
+            "Number of top time slots to consider", 1, 1000, 5
+        )
 
     def _calc_forward(self):
         # Display lookback data for lookback period
@@ -103,16 +115,11 @@ class App:
             unanchored_start += relativedelta(months=1)
             forward_end += relativedelta(months=1)
 
-        # Calculate fixed
-        lookback_data = self._get_lookback_data(self.lookback_start, self.lookback_end)
-        fixed = self._calc_fixed_pnl(lookback_data, self.lookback_end)
-
         # Display data as line graph
         st.header("Forward Analysis")
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(x, anchored, label="Anchored")
         ax.plot(x, unanchored, label="Unanchored")
-        ax.plot(x, fixed[: len(x)], label="Fixed")
         ax.set_xlabel("Date")
         ax.set_ylabel("PnL")
         ax.set_title("Running PnL")
@@ -126,7 +133,17 @@ class App:
                 pl.col("EntryTime") >= start,
                 pl.col("EntryTime") <= end,
             )
-            .group_by(pl.col("EntryTime").dt.to_string("%I:%M %p").alias("Time"))
+            .group_by("Year", self.agg_by, "Time")
+            .agg(pl.col("PnL").mean(), pl.col("PCR").mean())
+            .sort(self.sort_by, descending=True)
+            .group_by("Year", self.agg_by)
+            .agg(
+                pl.col("Time").limit(self.top_agg_n),
+                pl.col("PnL").limit(self.top_agg_n),
+                pl.col("PCR").limit(self.top_agg_n),
+            )
+            .explode("Time", "PnL", "PCR")
+            .group_by("Time")
             .agg(pl.col("PnL").mean(), pl.col("PCR").mean())
             .sort(self.sort_by, descending=True)
             .limit(self.top_n)
@@ -138,25 +155,12 @@ class App:
             self.df.filter(
                 pl.col("EntryTime") > start,
                 pl.col("EntryTime") <= end,
-                pl.col("EntryTime").dt.to_string("%I:%M %p").is_in(top_times),
+                pl.col("Time").is_in(top_times),
             )
             .select("PnL")
             .sum()
             .item()
         )
-
-    def _calc_fixed_pnl(self, lookback_data, start):
-        top_times = set(lookback_data["Time"])
-        return (
-            self.df.filter(
-                pl.col("EntryTime") > start,
-                pl.col("EntryTime").dt.to_string("%I:%M %p").is_in(top_times),
-            )
-            .group_by(pl.col("EntryTime").dt.to_string("%Y-%m").alias("Month"))
-            .agg(pl.col("PnL").sum())
-            .sort("Month")
-            .select(pl.col("PnL").cum_sum())
-        )["PnL"].to_list()
 
 
 if __name__ == "__main__":
